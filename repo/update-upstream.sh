@@ -2,7 +2,7 @@
 
 set -ex
 
-OPAM_SWITCH=${OPAM_SWITCH:-4.03.0}
+OPAM_SWITCH=${OPAM_SWITCH:-4.06.0}
 OPAM_REPO=${OPAM_REPO:-https://github.com/ocaml/opam-repository.git}
 OPAM_OS=${OPAM_OS:-darwin}
 
@@ -22,23 +22,33 @@ cleanup() {
 ## Fetch the opam-repository
 
 cd "${WORK_DIR}"
-git clone --depth=1 ${OPAM_REPO} ${REPO_DIR_NAME}
+git clone ${OPAM_REPO} ${REPO_DIR_NAME}
 cd ${REPO_DIR_NAME}
+if [ ! -z "${OPAM_BRANCH}" ]; then
+	git checkout "${OPAM_BRANCH}"
+fi
 
 ## copy the dev/ and local/ packages in the repo
-cp -LR "${TARGET_DIR}/packages/dev" packages/dev
+[ -d  "${TARGET_DIR}/packages/dev" ] && \
+    cp -LR "${TARGET_DIR}/packages/dev" packages/dev
+[ -d "${TARGET_DIR}/packages/dev" ] && \
+    git add packages/dev
+
 cp -LR "${TARGET_DIR}/packages/local" packages/local
-git add packages/dev packages/local
+git add packages/local
+
 git commit -a -m "Adding local and dev packages"
 
 # Remove the upstream packages that are copied in /dev
-for pkg in $(ls packages/dev); do
-  upstream="packages/${pkg%%.*}/${pkg}"
-  if [ -d "${upstream}" ]; then
-    rm -rf "${upstream}"
-  fi
-done
-git commit -a -m "Remove upstream source of dev packages" || echo "ok"
+if [ -d  packages/dev ]; then
+  for pkg in $(ls packages/dev); do
+    upstream="packages/${pkg%%.*}/${pkg}"
+    if [ -d "${upstream}" ]; then
+      rm -rf "${upstream}"
+    fi
+  done;
+  git commit -a -m "Remove upstream source of dev packages" || echo "ok"
+fi
 
 ## Compute the list of packages needed
 
@@ -76,7 +86,7 @@ echo "preinstalled=$(opam config var preinstalled)"
 echo "os=$(opam config var os)"
 
 OUTPUT=${WORK_DIR}/pkgs.json
-opam install --root=${OPAMROOT} ${PACKAGES} --build-test --dry-run --json=${OUTPUT}
+opam install --root=${OPAMROOT} ${PACKAGES} --dry-run --json=${OUTPUT}
 ALL_PACKAGES=$(jq '.[] | map(select(.install)) | map( [.install.name, .install.version] | join(".")) | join(" ")' ${OUTPUT})
 
 ## Copy the package metadata that are needed in packages/upstream

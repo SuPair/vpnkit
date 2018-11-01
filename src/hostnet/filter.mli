@@ -4,7 +4,7 @@ module Make(Input: Sig.VMNET): sig
   val connect:
     valid_subnets:Ipaddr.V4.Prefix.t list
     -> valid_sources:Ipaddr.V4.t list -> Input.t
-    -> [ `Ok of t | `Error of error ] Lwt.t
-  (** Construct a filtered ethernet network which removes IP packets whose
-      source IP is not in [valid_sources] *)
+    -> t
+    (** Construct a filtered ethernet network which removes IP packets whose
+        source IP is not in [valid_sources] *)
 end

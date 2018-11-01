@@ -1,22 +1,32 @@
 platform:
-  - x86
+  - x64
 
 environment:
-  CYG_ROOT: "C:\\cygwin"
+  CYG_ROOT: "C:\\cygwin64"
+  CYG_CACHE: C:/cygwin64/var/cache/setup
+  CYG_MIRROR: http://mirrors.kernel.org/sourceware/cygwin/
   CYG_BASH: "%CYG_ROOT%\\bin\\bash -lc"
+  CYG_ARCH: "x86_64"
   CYGWIN: "winsymlinks:native"
   CUSTOM_OPAM: "1"
-  OPAM_COMP: "4.03.0+mingw64c"
+  OPAM_COMP: "4.07.0+mingw64c"
+  OPAM_LINT: "false"
+  OPAMYES: 1
+  OPAMCOLORS: 1
+  OPAMVERBOSE: 1
+  BINDIR: 'C:\projects\vpnkit'
 
 install:
   - cmd: git config core.symlinks true
   - cmd: git reset --hard
-  - "%CYG_ROOT%\\setup-x86.exe -qnNdO -R %CYG_ROOT% -s http://cygwin.mirror.constant.com -l C:/cygwin/var/cache/setup -P rsync -P patch -P diffutils -P make -P unzip -P git -P m4 -P perl -P mingw64-x86_64-gcc-core"
+  - 'appveyor DownloadFile http://cygwin.com/setup-%CYG_ARCH%.exe -FileName setup.exe'
+  - 'setup.exe -gqnNdO -R "%CYG_ROOT%" -s "%CYG_MIRROR%" -l "%CYG_CACHE%" -P make,git,rsync,perl,gcc-core,gcc-g++,libncurses-devel,unzip,libmpfr-devel,patch,flexdll,libglpk-devel'
+  - '%CYG_ROOT%/bin/bash -lc "cygcheck -dc cygwin gcc-core"'
 
 build_script:
   - "%CYG_BASH% '${APPVEYOR_BUILD_FOLDER}/scripts/appveyor.sh'"
 
 artifacts:
-  - path: "com.docker.slirp.exe"
+  - path: "vpnkit.exe"
   - path: "OSS-LICENSES"
   - path: "COMMIT"

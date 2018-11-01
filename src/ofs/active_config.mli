@@ -32,10 +32,13 @@ module type S = sig
   (** The stream of bool values at [path] *)
 end
 
-module Make(Time: V1_LWT.TIME)(FLOW: V1_LWT.FLOW): sig
+module Make(Time: Mirage_time_lwt.S)(FLOW: Mirage_flow_lwt.S): sig
   include S
 
-  val create: ?username:string -> reconnect:(unit -> (FLOW.flow, [ `Msg of string ]) Result.result Lwt.t) -> unit -> t
-  (** [create ?username reconnect] creates an active configuration system
-      backed by the database connected to by [reconnect ()] *)
+  val create: ?username:string -> branch:string
+    -> reconnect:(unit -> (FLOW.flow, [ `Msg of string ]) result Lwt.t)
+    -> unit -> t
+    (** [create ?username branch reconnect] creates an active configuration system
+        backed by the database connected to by [reconnect ()] where the values
+        are read from the [branch] *)
 end

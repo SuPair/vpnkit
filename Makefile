@@ -1,19 +1,30 @@
 REPO_ROOT=$(shell git rev-parse --show-toplevel)
-COMMIT_ID=$(shell git rev-parse HEAD)
+ifeq ($(OS),Windows_NT)
+  OPAM_COMP?=4.06.7+mingw64c
+  OPAM_REPO?=repo/win32
+  OPAMROOT?=$(shell cygpath -w "$(REPO_ROOT)/_build/opam")
+else
+  OPAM_COMP?=4.07.0
+  OPAM_REPO?=repo/darwin
+  OPAMROOT?=$(REPO_ROOT)/_build/opam
+endif
+
 LICENSEDIRS=$(REPO_ROOT)/repo/licenses
 BINDIR?=$(shell pwd)
 
-BINARIES :=
-ARTEFACTS :=
+BINARIES := vpnkit.exe
+
+ARTEFACTS = COMMIT OSS-LICENSES
 ifeq ($(OS),Windows_NT)
-	BINARIES += com.docker.slirp.exe
-	ARTEFACTS += com.docker.slirp.exe
+	ARTEFACTS += vpnkit.exe
 else
-	BINARIES += com.docker.slirp
-	ARTEFACTS += com.docker.slirp.tgz
+	ARTEFACTS += vpnkit.tgz
 endif
 
-all: $(BINARIES)
+all: $(OPAMROOT) $(BINARIES)
+
+$(OPAMROOT):
+	OPAMROOT=$(OPAMROOT) OPAM_COMP=$(OPAM_COMP) OPAM_REPO=$(OPAM_REPO) ./scripts/depends.sh
 
 .PHONY: install
 install: $(BINARIES)
@@ -25,62 +36,66 @@ uninstall:
 		rm -f $$BINARY ; \
 	done
 
+.PHONY: artefacts
 artefacts: $(ARTEFACTS)
 
-src/bin/depends.ml: src/bin/depends.ml.in
-	$(OPAMFLAGS) opam config subst src/bin/depends.ml || true
-	cp src/bin/depends.ml src/bin/depends.tmp
-	sed -e 's/%%VERSION%%/$(shell git rev-parse HEAD)/g' src/bin/depends.tmp > src/bin/depends.ml
-	cp src/bin/depends.ml src/bin/depends.tmp
-	sed -e 's/%%HOSTNET_PINNED%%/$(shell opam info hostnet -f pinned)/g' src/bin/depends.tmp > src/bin/depends.ml
-	cp src/bin/depends.ml src/bin/depends.tmp
-	sed -e 's/%%HVSOCK_PINNED%%/$(shell opam info hvsock -f pinned)/g' src/bin/depends.tmp > src/bin/depends.ml
-
-com.docker.slirp.tgz: com.docker.slirp
-	mkdir -p _build/root/Contents/MacOS
-	cp com.docker.slirp _build/root/Contents/MacOS/com.docker.slirp
+vpnkit.tgz: vpnkit.exe
+	mkdir -p _build/root/Contents/Resources/bin
+	cp vpnkit.exe _build/root/Contents/Resources/bin/vpnkit
 	dylibbundler -od -b \
-		-x _build/root/Contents/MacOS/com.docker.slirp \
+		-x _build/root/Contents/Resources/bin/vpnkit \
 		-d _build/root/Contents/Resources/lib \
-		-p @executable_path/../Resources/lib
-	tar -C _build/root -cvzf com.docker.slirp.tgz Contents
+		-p @executable_path/../lib
+	tar -C _build/root -cvzf vpnkit.tgz Contents
 
-.PHONY: com.docker.slirp.exe
-com.docker.slirp.exe: src/bin/depends.ml setup.data
-	ocaml setup.ml -build
-	cp _build/src/bin/main.native com.docker.slirp.exe
+.PHONY: vpnkit.exe
+vpnkit.exe: $(OPAMROOT)
+	opam config --root $(OPAMROOT) --switch $(OPAM_COMP) exec -- sh -c 'jbuilder build --dev src/bin/main.exe'
+	cp _build/default/src/bin/main.exe vpnkit.exe
 
-.PHONY: com.docker.slirp
-com.docker.slirp: src/bin/depends.ml setup.data
-	ocaml setup.ml -build
-	cp _build/src/bin/main.native com.docker.slirp
-
-setup.data: _oasis
-	oasis setup
-	ocaml setup.ml -configure --disable-tests
+%: %.in
+	@echo "  GEN     " $@
+	@sed -e "s/@COMMIT@/$$(git rev-parse HEAD)/" $< >$@.tmp
+	@mv $@.tmp $@
 
 .PHONY: test
-test: _oasis
-	oasis setup
-	ocaml setup.ml -configure --enable-tests
-	ocaml setup.ml -build
-	ocaml setup.ml -test
+test: $(OPAMROOT)
+	opam config --root $(OPAMROOT) --switch $(OPAM_COMP) exec -- sh -c 'jbuilder build --dev src/hostnet_test/main.exe'
+	cp -r go/test_inputs _build/default/src/hostnet_test/
+# One test requires 1026 file descriptors
+	ulimit -n 1500 && ./_build/default/src/hostnet_test/main.exe
 
+# Published as an artifact.
 .PHONY: OSS-LICENSES
 OSS-LICENSES:
+	echo "  GEN     " $@
 	mkdir -p $(LICENSEDIRS)
-	cd $(LICENSEDIRS) && \
-	  $(OPAMFLAGS) $(REPO_ROOT)/repo/opam-licenses.sh slirp
-	$(REPO_ROOT)/repo/list-licenses.sh $(LICENSEDIRS) > OSS-LICENSES
+	opam config --root $(OPAMROOT) --switch $(OPAM_COMP) exec -- sh -c 'cd $(LICENSEDIRS) && $(REPO_ROOT)/repo/opam-licenses.sh vpnkit'
+	$(REPO_ROOT)/repo/list-licenses.sh $(LICENSEDIRS) > $@.tmp
+	mv $@.tmp $@
 
+# Published as an artifact.
 .PHONY: COMMIT
 COMMIT:
-	@echo $(COMMIT_ID) > COMMIT
+	@echo "  GEN     " $@
+	@git rev-parse HEAD > $@.tmp
+	@mv $@.tmp $@
 
 .PHONY: clean
-clean:
+clean:	
 	rm -rf _build
-	rm -f com.docker.slirp
-	rm -f com.docker.slirp.tgz
-	rm -f src/bin/depends.ml
-	rm -f setup.data
+	rm -f vpnkit.exe
+	rm -f vpnkit.tgz
+
+REPO=../../mirage/opam-repository
+PACKAGES=$(REPO)/packages
+# until we have https://github.com/ocaml/opam-publish/issues/38
+pkg-%:
+	topkg opam pkg -n $*
+	mkdir -p $(PACKAGES)/$*
+	cp -r _build/$*.* $(PACKAGES)/$*/
+	cd $(PACKAGES) && git add $*
+
+PKGS=$(basename $(wildcard *.opam))
+opam-pkg:
+	$(MAKE) $(PKGS:%=pkg-%)

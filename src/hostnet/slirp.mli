@@ -4,43 +4,64 @@ type pcap = (string * int64 option) option
     file will grow without bound; otherwise the file will be closed when it is
     bigger than the given limit. *)
 
-type config = {
-  peer_ip: Ipaddr.V4.t;
-  local_ip: Ipaddr.V4.t;
-  extra_dns_ip: Ipaddr.V4.t list;
-  get_domain_search: unit -> string list;
-  get_domain_name: unit -> string;
-  pcap_settings: pcap Active_config.values;
-}
-(** A slirp TCP/IP stack ready to accept connections *)
+module Make
+    (Config: Active_config.S)
+    (Vmnet: Sig.VMNET)
+    (Dns_policy: Sig.DNS_POLICY)
+    (Clock: sig
+       include Mirage_clock_lwt.MCLOCK
+       val connect: unit -> t Lwt.t
+     end)
+    (Random: Mirage_random.C)
+    (Vnet : Vnetif.BACKEND with type macaddr = Macaddr.t) :
+sig
 
-module Make(Config: Active_config.S)(Vmnet: Sig.VMNET)(Dns_policy: Sig.DNS_POLICY)(Host: Sig.HOST): sig
+  type stack
+  (** A TCP/IP stack which may talk to multiple ethernet clients *)
 
-  val create: Config.t -> config Lwt.t
-  (** Initialise a TCP/IP stack, taking configuration from the Config.t *)
+  val create_static: Clock.t -> Vnet.t -> Configuration.t -> stack Lwt.t
+  (** Initialise a TCP/IP stack, with a static configuration *)
 
-  type t
+  val create_from_active_config: Clock.t -> Vnet.t -> Configuration.t -> Config.t -> stack Lwt.t
+  (** Initialise a TCP/IP stack, allowing the dynamic Config.t to override
+      the static Configuration.t *)
 
-  val connect: config -> Vmnet.fd -> t Lwt.t
-  (** Read and write ethernet frames on the given fd *)
+  type connection
+  (** An ethernet connection to a stack *)
 
-  val after_disconnect: t -> unit Lwt.t
+  val connect: stack -> Vmnet.fd -> connection Lwt.t
+  (** Read and write ethernet frames on the given fd, connected to the
+      specified Vnetif backend *)
+
+  val after_disconnect: connection -> unit Lwt.t
   (** Waits until the stack has been disconnected *)
 
-  val filesystem: t -> Vfs.Dir.t
+  val filesystem: connection -> Vfs.Dir.t
   (** A virtual filesystem which exposes internal state for debugging *)
 
-  val diagnostics: t -> Host.Sockets.Stream.Unix.flow -> unit Lwt.t
+  val diagnostics: connection -> Host.Sockets.Stream.Unix.flow -> unit Lwt.t
   (** Output diagnostics in .tar format over a local Unix socket or named pipe *)
 
+  val pcap: connection -> Host.Sockets.Stream.Unix.flow -> unit Lwt.t
+  (** Output all traffic in pcap format over a local Unix socket or named pipe *)
+
   module Debug: sig
-    val get_nat_table_size: t -> int
+    val get_nat_table_size: connection -> int
     (** Return the number of active NAT table entries *)
+
+    val update_dns: ?local_ip:Ipaddr.t -> ?builtin_names:(Dns.Name.t * Ipaddr.t) list ->
+      Clock.t -> unit
+    (** Update the DNS forwarder following a configuration change *)
+
+    val update_http: ?http:string -> ?https:string -> ?exclude:string
+      -> ?transparent_http_ports:int list -> ?transparent_https_ports:int list
+      -> unit -> (unit, [`Msg of string]) result Lwt.t
+    (** Update the HTTP forwarder following a configuration change *)
+
+    val update_http_json: Ezjsonm.value ->
+      unit -> (unit, [`Msg of string]) result Lwt.t
+    (** Update the HTTP forwarder using the json interface *)
   end
 end
 
 val print_pcap: pcap -> string
-
-val client_macaddr: Macaddr.t
-
-val server_macaddr: Macaddr.t

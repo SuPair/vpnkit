@@ -1,25 +1,25 @@
-
 module type READ_INTO = sig
   type flow
   type error
 
-  val read_into: flow -> Cstruct.t -> [ `Eof | `Error of error | `Ok of unit ] Lwt.t
-  (** Completely fills the given buffer with data from [fd] *)
+  val read_into: flow -> Cstruct.t ->
+    (unit Mirage_flow.or_eof, error) result Lwt.t
+    (** Completely fills the given buffer with data from [fd] *)
 end
 
 module type FLOW_CLIENT = sig
-  include Mirage_flow_s.SHUTDOWNABLE
+  include Mirage_flow_lwt.SHUTDOWNABLE
 
   type address
 
-  val connect: ?read_buffer_size:int -> address
-    -> flow Error.t
-  (** [connect address] creates a connection to [address] and returns
-      he connected flow. *)
+  val connect: ?read_buffer_size:int -> address ->
+    (flow, [`Msg of string]) result Lwt.t
+    (** [connect address] creates a connection to [address] and returns
+        he connected flow. *)
 end
 
 module type CONN = sig
-  include V1_LWT.FLOW
+  include Mirage_flow_lwt.S
 
   include READ_INTO
     with type flow := flow
@@ -36,11 +36,16 @@ module type FLOW_SERVER = sig
   (** Create a server from a file descriptor bound to a Unix domain socket
       by some other process and passed to us. *)
 
-  val bind: address -> server Lwt.t
+  val bind: ?description:string -> address -> server Lwt.t
   (** Bind a server to an address *)
 
   val getsockname: server -> address
   (** Query the address the server is bound to *)
+
+  val disable_connection_tracking: server -> unit
+  (** For a particular server, exempt connections from the tracking mechanism.
+      This is intended for internal purposes only (e.g. extracting diagnostics
+      information) *)
 
   type flow
 
@@ -62,8 +67,13 @@ module type SOCKETS = sig
   (** TODO: hide these by refactoring Hyper-V sockets stuff *)
   val register_connection: string -> int Lwt.t
   val deregister_connection: int -> unit
-  val connections: Vfs.Dir.t
+  val get_num_connections: unit -> int
+
+  (** Fetch the number of tracked connections *)
+  val connections: unit -> Vfs.File.t
   (** A filesystem which allows the connections to be introspected *)
+
+  exception Too_many_connections
 
   module Datagram: sig
 
@@ -81,7 +91,7 @@ module type SOCKETS = sig
 
       val recvfrom: server -> Cstruct.t -> (int * address) Lwt.t
 
-      val sendto: server -> address -> Cstruct.t -> unit Lwt.t
+      val sendto: server -> address -> ?ttl:int -> Cstruct.t -> unit Lwt.t
     end
   end
   module Stream: sig
@@ -112,7 +122,7 @@ module type SOCKETS = sig
 
       include FLOW_SERVER
         with type address := address
-        and type flow := flow
+         and type flow := flow
 
       val unsafe_get_raw_fd: flow -> Unix.file_descr
       (** Return the underlying fd. This is intended for careful integration
@@ -126,17 +136,22 @@ end
 module type FILES = sig
   (** An OS-based file reading implementation *)
 
-  val read_file: string -> string Error.t
+  val read_file: string -> (string, [`Msg of string]) result Lwt.t
   (** Read a whole file into a string *)
 
   type watch
 
-  val watch_file: string -> (unit -> unit) -> (watch, [ `Msg of string ]) Result.result
+  val watch_file: string -> (unit -> unit) -> (watch, [ `Msg of string ]) result
   (** [watch_file path callback] executes [callback] whenever the contents of
       [path] may have changed. *)
 
   val unwatch: watch -> unit
   (** [unwatch watch] stops watching the path(s) associated with [watch] *)
+end
+
+module type DNS = sig
+  val resolve: Dns.Packet.question -> Dns.Packet.rr list Lwt.t
+  (** Given a question, find associated resource records *)
 end
 
 module type HOST = sig
@@ -151,7 +166,11 @@ module type HOST = sig
     include FILES
   end
 
-  module Time: V1_LWT.TIME
+  module Time: Mirage_time_lwt.S
+
+  module Dns: sig
+    include DNS
+  end
 
   module Main: sig
     val run: unit Lwt.t -> unit
@@ -160,12 +179,26 @@ module type HOST = sig
     val run_in_main: (unit -> 'a Lwt.t) -> 'a
     (** Run the function in the main thread *)
   end
+
+  module Fn: sig
+    (** Call a blocking ('a -> 'b) function in a ('a -> 'b Lwt.t) context *)
+
+    type ('request, 'response) t
+    (** A function from 'request to 'response *)
+
+    val create: ('request -> 'response) -> ('request, 'response) t
+    val destroy: ('request, 'response) t -> unit
+
+    val fn: ('request, 'response) t -> 'request -> 'response Lwt.t
+    (** Apply the function *)
+
+  end
 end
 
 module type VMNET = sig
   (** A virtual ethernet link to the VM *)
 
-  include V1_LWT.NETWORK
+  include Mirage_net_lwt.S
 
   val add_listener: t -> (Cstruct.t -> unit Lwt.t) -> unit
   (** Add a callback which will be invoked in parallel with all received packets *)
@@ -175,38 +208,45 @@ module type VMNET = sig
 
   type fd
 
-  val of_fd: client_macaddr:Macaddr.t -> server_macaddr:Macaddr.t
-    -> fd -> t Error.t
+  val of_fd:
+    connect_client_fn:(Uuidm.t -> Ipaddr.V4.t option -> (Macaddr.t, [`Msg of string]) result Lwt.t) ->
+    server_macaddr:Macaddr.t ->
+    mtu:int ->
+    fd -> (t, [`Msg of string]) result Lwt.t
 
   val start_capture: t -> ?size_limit:int64 -> string -> unit Lwt.t
 
   val stop_capture: t -> unit Lwt.t
+
+  val get_client_uuid: t -> Uuidm.t
+
+  val get_client_macaddr: t -> Macaddr.t
 end
 
 module type DNS_POLICY = sig
   (** Policy settings
 
-    DNS configuration is taken from 4 places, lowest to highest priority:
+      DNS configuration is taken from 4 places, lowest to highest priority:
 
-    - 0: a built-in default of the Google public DNS servers
-    - 1: a default configuration (from a command-line argument or a configuration
-      file)
-    - 2: the `/etc/resolv.conf` file if present
-    - 3: the database key `slirp/dns`
+      - 0: a built-in default of the Google public DNS servers
+      - 1: a default configuration (from a command-line argument or a
+           configuration file)
+      - 2: the `/etc/resolv.conf` file if present
+      - 3: the database key `slirp/dns`
 
-    If configuration with a higher priority is found then it completely overrides
-    lower priority configuration.
-  *)
+      If configuration with a higher priority is found then it
+      completely overrides lower priority configuration.  *)
 
   type priority = int (** higher is more important *)
 
-  val add: priority:priority -> config:Dns_forward.Config.t -> unit
+  val add: priority:priority ->
+    config:[ `Upstream of Dns_forward.Config.t | `Host ] -> unit
   (** Add some configuration at the given priority level *)
 
   val remove: priority:priority -> unit
   (** Remove the configuration at the given priority level *)
 
-  val config: unit -> Dns_forward.Config.t
+  val config: unit -> [ `Upstream of Dns_forward.Config.t | `Host ]
   (** Return the currently active DNS configuration *)
 end
 
@@ -216,8 +256,9 @@ module type RECORDER = sig
   type t
 
   val record: t -> Cstruct.t list -> unit
-  (** Inject a packet and record it if it matches a rule. This is intended for
-      debugging: the packet will not be transmitted to the underlying network. *)
+  (** Inject a packet and record it if it matches a rule. This is
+      intended for debugging: the packet will not be transmitted to
+      the underlying network. *)
 end
 
 module type Connector = sig
